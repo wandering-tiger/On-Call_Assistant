@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>On-Call Assistant</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
+</head>
+<body>
+    <header class="header">
+        <div class="logo">🛟 On-Call <span>Assistant</span></div>
+        <nav class="nav-tabs">
+            <a href="/v1" class="nav-tab" data-tab="v1">🔍 关键词搜索</a>
+            <a href="/v2" class="nav-tab" data-tab="v2">🧠 语义搜索</a>
+            <a href="/v3" class="nav-tab" data-tab="v3">🤖 Agent 助手</a>
+        </nav>
+    </header>
+
+    <main class="main">
+        <!-- Phase 1: Keyword Search -->
+        <div id="view-v1" class="view" style="display: none;">
+            <div class="search-section">
+                <div class="search-box">
+                    <input type="text" class="search-input" id="v1-input"
+                           placeholder="输入关键词搜索 SOP 文档，例如：OOM、故障、CDN..."
+                           autocomplete="off">
+                    <button class="search-btn" id="v1-btn" onclick="searchV1()">搜索</button>
+                </div>
+                <div class="search-stats" id="v1-stats"></div>
+            </div>
+            <div class="results-list" id="v1-results">
+                <div class="empty-state">
+                    <div class="icon">🔍</div>
+                    <h3>关键词搜索引擎</h3>
+                    <p>基于 TF-IDF 的全文检索，支持中英文混合搜索。输入关键词开始查找相关 SOP 文档。</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Phase 2: Semantic Search -->
+        <div id="view-v2" class="view" style="display: none;">
+            <div class="search-section">
+                <div class="search-box">
+                    <input type="text" class="search-input" id="v2-input"
+                           placeholder="用自然语言描述问题，例如：服务器挂了怎么办..."
+                           autocomplete="off">
+                    <button class="search-btn" id="v2-btn" onclick="searchV2()">语义搜索</button>
+                </div>
+                <div class="search-stats" id="v2-stats"></div>
+            </div>
+            <div class="results-list" id="v2-results">
+                <div class="empty-state">
+                    <div class="icon">🧠</div>
+                    <h3>语义搜索引擎</h3>
+                    <p>基于 LLM 的语义相关性排序，理解查询意图。即使关键词不完全匹配也能找到相关文档。</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Phase 3: Agent Chat -->
+        <div id="view-v3" class="view" style="display: none;">
+            <div class="chat-container">
+                <div class="chat-messages" id="chat-messages">
+                    <div class="empty-state" id="chat-empty">
+                        <div class="icon">🤖</div>
+                        <h3>On-Call Agent 助手</h3>
+                        <p>一个基于 ReAct 框架的智能 Agent，可以自动查阅 SOP 文档来回答您的值班问题。试试问："数据库主从延迟超过30秒怎么处理？"</p>
+                    </div>
+                </div>
+                <div class="chat-input-area">
+                    <textarea class="chat-input" id="chat-input"
+                              placeholder="输入您的 On-Call 问题..."
+                              rows="1"
+                              onkeydown="if(event.key==='Enter' && !event.shiftKey && !event.ctrlKey){event.preventDefault();sendChat();}"></textarea>
+                    <button class="chat-send" id="chat-send-btn" onclick="sendChat()">发送</button>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>

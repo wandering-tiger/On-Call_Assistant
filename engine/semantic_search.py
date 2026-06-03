@@ -1,12 +1,14 @@
-"""Phase 2: Semantic search using DeepSeek LLM for relevance ranking.
+"""Phase 2: Semantic search using DeepSeek LLM for direct document ranking.
 
-Strategy:
-1. Use keyword search (Phase 1) as first-pass retrieval to get candidates
-2. Use DeepSeek chat API to evaluate semantic relevance of each candidate
-3. Return re-ranked results with LLM-based relevance scores
+Strategy (single-stage LLM ranking):
+1. Build document summaries (title + first 800 chars of content) for every SOP
+2. In ONE LLM call, present all documents with their summaries + the query
+3. Ask LLM to select and rank the most relevant documents
+4. Parse the ranked list and return results
 
-This approach works well for small-to-medium document collections and
-doesn't require a dedicated embeddings API.
+This avoids the keyword-search bottleneck: the LLM sees ALL documents
+and judges relevance semantically, so colloquial queries like "服务器挂了"
+correctly match backend/SRE docs even though "挂了" never appears in them.
 """
 
 import json
@@ -18,137 +20,139 @@ import httpx
 from config import DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_CHAT_MODEL
 from engine.document_store import store
 
-SEMANTIC_RANKING_PROMPT = """You are a search relevance judge. Given a search query and a document, rate how relevant the document is to the query on a scale of 0.0 to 1.0.
+# ── Document summaries ────────────────────────────────────────────────
 
-Query: {query}
-
-Document Title: {title}
-Document Content (excerpt): {content}
-
-Return ONLY a JSON object with the following format:
-{{"score": 0.XX, "reason": "brief explanation in Chinese"}}
-
-The score should reflect semantic relevance, not just keyword matching. Consider:
-- Does the document topic match the query intent?
-- Would this document help answer the query?
-- Is the document about the same domain/area as the query?
-
-JSON:"""
+def _build_doc_summaries() -> list[dict]:
+    """Build title + summary for every indexed document."""
+    summaries = []
+    for doc_id, doc in store.documents.items():
+        # First 800 chars of plain text as the summary
+        text = doc["text"][:800].replace("\n", " ").strip()
+        summaries.append({
+            "id": doc_id,
+            "title": doc["title"],
+            "summary": text,
+        })
+    return summaries
 
 
-def _build_semantic_request(query: str, doc_id: str) -> dict:
-    """Build the API request for semantic relevance scoring."""
-    doc = store.documents.get(doc_id)
-    if not doc:
-        return {"score": 0.0, "reason": "Document not found"}
+# ── LLM Ranking Prompt ────────────────────────────────────────────────
 
-    # Use first 2000 chars as excerpt
-    content = doc["text"][:2000]
+RANKING_SYSTEM = """你是一个专业的搜索引擎排序专家。用户会用自然语言描述他们遇到的运维问题，你需要从所有 SOP 文档中找出最相关的。
 
-    return {
-        "model": DEEPSEEK_CHAT_MODEL,
-        "messages": [
-            {
-                "role": "user",
-                "content": SEMANTIC_RANKING_PROMPT.format(
-                    query=query,
-                    title=doc["title"],
-                    content=content,
-                ),
-            }
-        ],
-        "temperature": 0.1,
-        "max_tokens": 200,
-        "stream": False,
-    }
+## 规则
+1. 理解用户查询的真实意图（用户可能使用口语化表达，如"挂了"="服务不可用/宕机"）
+2. 根据文档的主题领域和内容，判断哪些文档能最好地回答用户的问题
+3. 按相关度从高到低排序，只返回相关度 > 0.3 的文档
+4. 返回严格的 JSON 格式，不要包含任何其他文字"""
 
 
-async def _score_document(
-    client: httpx.AsyncClient,
-    query: str,
-    doc_id: str,
-) -> tuple[str, float, str]:
-    """Score a single document's relevance to the query. Returns (doc_id, score, reason)."""
-    request = _build_semantic_request(query, doc_id)
+def _build_ranking_prompt(query: str) -> str:
+    """Build the prompt with all document summaries for ranking."""
+    summaries = _build_doc_summaries()
+
+    docs_text = ""
+    for i, s in enumerate(summaries, 1):
+        docs_text += f"[{i}] ID: {s['id']} | {s['title']}\n   摘要: {s['summary']}\n\n"
+
+    return f"""以下是所有可用的 SOP 文档：
+
+{docs_text}
+---
+用户查询："{query}"
+
+请判断哪些文档与用户查询最相关。按相关度从高到低排序，返回 JSON：
+
+{{"results": [
+  {{"id": "sop-xxx", "score": 0.95, "reason": "一句话中文解释为什么相关"}},
+  ...
+]}}
+
+注意：
+- score 范围 0.0～1.0，只包含 score > 0.3 的文档
+- "挂了" = 服务宕机/不可用/崩溃
+- "被攻击" = 安全事件/入侵/DDoS
+- 口语化查询要理解其真实意图"""
+
+
+# ── Single-call LLM ranking ──────────────────────────────────────────
+
+async def semantic_search(query: str, max_results: int = 10) -> dict:
+    """
+    Semantic search via single LLM ranking call.
+    The LLM sees ALL documents and ranks them by semantic relevance.
+    """
+    prompt = _build_ranking_prompt(query)
 
     headers = {
         "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
         "Content-Type": "application/json",
     }
 
-    try:
-        response = await client.post(
-            f"{DEEPSEEK_BASE_URL}/v1/chat/completions",
-            headers=headers,
-            json=request,
-            timeout=30.0,
-        )
-        if response.status_code != 200:
-            return doc_id, 0.0, f"API error: {response.status_code}"
+    request_body = {
+        "model": DEEPSEEK_CHAT_MODEL,
+        "messages": [
+            {"role": "system", "content": RANKING_SYSTEM},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0.1,
+        "max_tokens": 2048,
+        "stream": False,
+    }
 
-        data = response.json()
-        content = data["choices"][0]["message"]["content"].strip()
-
-        # Parse JSON from response
-        # Handle potential markdown code block wrapping
-        if content.startswith("```"):
-            content = content.split("```")[1]
-            if content.startswith("json"):
-                content = content[4:]
-            content = content.strip()
-
-        result = json.loads(content)
-        score = float(result.get("score", 0.0))
-        reason = result.get("reason", "")
-        return doc_id, max(0.0, min(1.0, score)), reason
-
-    except (json.JSONDecodeError, KeyError, IndexError) as e:
-        return doc_id, 0.0, f"Parse error: {e}"
-    except Exception as e:
-        return doc_id, 0.0, str(e)
-
-
-async def semantic_search(
-    query: str,
-    max_results: int = 10,
-    candidate_multiplier: int = 3,
-) -> dict:
-    """
-    Perform semantic search with LLM re-ranking.
-    1. Get candidates from keyword search (more than needed)
-    2. Re-rank using DeepSeek LLM
-    3. Return top results
-    """
-    # Step 1: Get keyword search candidates
-    candidates = store.search(query, max_results=max_results * candidate_multiplier)
-
-    if not candidates:
-        return {"query": query, "results": []}
-
-    # Step 2: Re-rank with LLM
     async with httpx.AsyncClient() as client:
-        tasks = [
-            _score_document(client, query, c["id"]) for c in candidates
-        ]
-        scored = await asyncio.gather(*tasks)
+        try:
+            response = await client.post(
+                f"{DEEPSEEK_BASE_URL}/v1/chat/completions",
+                headers=headers,
+                json=request_body,
+                timeout=60.0,
+            )
 
-    # Step 3: Sort by semantic score and build results
-    doc_scores = {doc_id: (score, reason) for doc_id, score, reason in scored}
+            if response.status_code != 200:
+                return {"query": query, "results": [], "error": f"API error: {response.status_code}"}
 
+            data = response.json()
+            content = data["choices"][0]["message"]["content"].strip()
+
+            # Parse JSON from response
+            if content.startswith("```"):
+                content = content.split("```")[1]
+                if content.startswith("json"):
+                    content = content[4:]
+                content = content.strip()
+
+            parsed = json.loads(content)
+            ranked = parsed.get("results", [])
+
+        except (json.JSONDecodeError, KeyError, IndexError) as e:
+            return {"query": query, "results": [], "error": f"LLM 响应解析失败: {e}"}
+        except Exception as e:
+            return {"query": query, "results": [], "error": str(e)}
+
+    # Filter, sort and format results
     results = []
-    for candidate in candidates:
-        doc_id = candidate["id"]
-        score, reason = doc_scores.get(doc_id, (0.0, ""))
-        if score > 0.05:  # Filter very low relevance
-            results.append({
-                "id": candidate["id"],
-                "title": candidate["title"],
-                "snippet": candidate["snippet"],
-                "score": round(score, 4),
-                "reason": reason,
-            })
+    for item in ranked:
+        doc_id = item.get("id", "")
+        doc = store.documents.get(doc_id)
+        if not doc:
+            # Try adding .html
+            doc = store.documents.get(doc_id + ".html") if not doc_id.endswith(".html") else None
+            if not doc:
+                continue
 
-    # Sort by semantic score
+        score = max(0.0, min(1.0, float(item.get("score", 0.0))))
+        if score <= 0.3:
+            continue
+
+        results.append({
+            "id": doc["id"],
+            "title": doc["title"],
+            "snippet": doc["text"][:200] + ("..." if len(doc["text"]) > 200 else ""),
+            "score": round(score, 4),
+            "reason": item.get("reason", ""),
+        })
+
     results.sort(key=lambda x: x["score"], reverse=True)
     results = results[:max_results]
 

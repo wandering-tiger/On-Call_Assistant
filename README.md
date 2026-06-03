@@ -6,7 +6,7 @@
 
 ```
 On-Call_Assistant/
-├── main.py                      # FastAPI 应用入口（路由 + 内嵌前端）
+├── main.py                      # FastAPI 应用入口（路由定义）
 ├── config.py                    # 配置文件（API Key、路径等）
 ├── requirements.txt             # Python 依赖
 ├── engine/
@@ -15,6 +15,10 @@ On-Call_Assistant/
 │   ├── keyword_search.py        # Phase 1：关键词搜索引擎
 │   ├── semantic_search.py       # Phase 2：语义搜索引擎（LLM 重排序）
 │   └── agent.py                 # Phase 3：ReAct Agent（自实现框架）
+├── frontend/
+│   ├── index.html               # 前端页面（单页应用，三栏切换）
+│   ├── style.css                # 样式表（浅色主题）
+│   └── app.js                   # 前端逻辑（搜索、Agent 对话、Markdown 渲染）
 ├── data/                        # 10 份部门 On-Call SOP 文档
 │   ├── sop-001.html             # 后端服务
 │   ├── sop-002.html             # 数据库 DBA
