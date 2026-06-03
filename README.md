@@ -125,6 +125,17 @@ export LLM_PROVIDER=zhipu       # 智谱 GLM
 export LLM_PROVIDER=qwen        # 阿里通义千问
 ```
 
+```bash
+# Linux / macOS
+export LLM_API_KEY="sk-xxxxxxxxxxxxxxxx"
+
+# Windows (PowerShell)
+$env:LLM_API_KEY="sk-xxxxxxxxxxxxxxxx"
+
+# Windows (CMD)
+set LLM_API_KEY=sk-xxxxxxxxxxxxxxxx
+```
+
 **方式二：手动指定**
 
 ```bash
