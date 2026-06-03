@@ -38,5 +38,5 @@ Thumbs.db
 test-*.html
 
 # Project-specific
-screenshots/
+screenshot/
 prompt/
