@@ -233,10 +233,13 @@ function addAgentStep(type, content) {
     } else if (type === 'observation') {
         const div = document.createElement('div');
         div.className = 'agent-step';
+        const truncated = content.length > 800
+            ? escapeHtml(content.substring(0, 800)) + '\n\n... (内容过长，已截断，完整内容请查看源文件)'
+            : escapeHtml(content);
         div.innerHTML = `
             <details class="step-observation">
-                <summary>📄 文档内容 (点击展开)</summary>
-                ${escapeHtml(content)}
+                <summary>文档内容</summary>
+                <div class="obs-content">${truncated}</div>
             </details>`;
         messagesDiv.appendChild(div);
     }

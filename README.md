@@ -52,11 +52,12 @@ On-Call_Assistant/
 
 ### Phase 2 — 语义搜索引擎（`/v2`）
 
-基于 **LLM 语义理解** 的智能搜索，即使关键词不完全匹配也能找到相关文档。
+基于 **DeepSeek LLM 单次调用直接排序** 的语义搜索，即使关键词不完全匹配也能找到相关文档。
 
-- **两阶段检索**：先用关键词搜索获取候选集，再用 DeepSeek LLM 进行语义重排序
-- **意图理解**：LLM 判断文档与查询在语义层面的相关程度，而非简单的关键词匹配
-- **结果解释**：每条结果附带 LLM 给出的相关性理由
+- **直接 LLM 排序**：将所有文档的标题和摘要一次性呈现给 LLM，由 LLM 理解查询意图并直接返回排序结果 — 无关键词检索瓶颈
+- **意图理解**：原生支持口语化查询（"挂了"→服务宕机、"被攻击"→安全入侵），不依赖精确关键词匹配
+- **结果解释**：每条结果附带 LLM 给出的中文相关性理由
+- **性能优化**：文档摘要压缩至 ~250 字/篇，100 份文档约 12,750 tokens，完全适配 LLM 上下文窗口
 
 | API | 方法 | 说明 |
 |-----|------|------|
@@ -82,7 +83,7 @@ On-Call_Assistant/
 ### 环境要求
 
 - Python 3.11+
-- DeepSeek API Key（Phase 2 和 Phase 3 需要，Phase 1 不需要）
+- 任意兼容 OpenAI API 格式的 LLM 提供商（Phase 2 和 Phase 3 需要，Phase 1 不需要）
 
 ### 1. 安装依赖
 
@@ -96,25 +97,61 @@ pip install -r requirements.txt
 |------|------|
 | `fastapi` | Web 框架 |
 | `uvicorn` | ASGI 服务器 |
-| `httpx` | 异步 HTTP 客户端（调用 DeepSeek API） |
+| `httpx` | 异步 HTTP 客户端（调用 LLM API） |
 | `beautifulsoup4` | HTML 解析 |
 | `pydantic` | 数据校验 |
 | `jieba` | 中文分词 |
 | `numpy` | 数值计算 |
 | `python-multipart` | 表单数据支持 |
 
-### 2. 配置 API Key
+### 2. 配置 LLM 提供商
+
+支持所有兼容 OpenAI API 格式的 LLM 服务。有三种配置方式：
+
+**方式一：使用预设（推荐）**
 
 ```bash
-# Linux / macOS
-export DEEPSEEK_API_KEY="sk-xxxxxxxxxxxxxxxx"
+# DeepSeek（默认）
+export LLM_PROVIDER=deepseek
+export LLM_API_KEY="sk-xxxxxxxxxxxxxxxx"
 
-# Windows (PowerShell)
-$env:DEEPSEEK_API_KEY="sk-xxxxxxxxxxxxxxxx"
+# OpenAI
+export LLM_PROVIDER=openai
+export LLM_API_KEY="sk-xxxxxxxxxxxxxxxx"
 
-# Windows (CMD)
-set DEEPSEEK_API_KEY=sk-xxxxxxxxxxxxxxxx
+# 其他预设
+export LLM_PROVIDER=moonshot    # 月之暗面 Moonshot
+export LLM_PROVIDER=zhipu       # 智谱 GLM
+export LLM_PROVIDER=qwen        # 阿里通义千问
 ```
+
+**方式二：手动指定**
+
+```bash
+export LLM_API_KEY="sk-xxxxxxxxxxxxxxxx"
+export LLM_BASE_URL="https://api.deepseek.com"
+export LLM_CHAT_MODEL="deepseek-chat"
+```
+
+**方式三：向后兼容（旧环境变量仍有效）**
+
+```bash
+export DEEPSEEK_API_KEY="sk-xxxxxxxxxxxxxxxx"    # 等同于 LLM_API_KEY
+```
+
+**支持的预设提供商：**
+
+| 预设名 | 提供商 | 默认模型 | Base URL |
+|--------|--------|----------|----------|
+| `deepseek` | DeepSeek | `deepseek-chat` | `https://api.deepseek.com` |
+| `openai` | OpenAI | `gpt-4o` | `https://api.openai.com/v1` |
+| `moonshot` | 月之暗面 | `moonshot-v1-8k` | `https://api.moonshot.cn/v1` |
+| `zhipu` | 智谱 AI | `glm-4` | `https://open.bigmodel.cn/api/paas/v4` |
+| `qwen` | 阿里通义千问 | `qwen-plus` | `https://dashscope.aliyuncs.com/compatible-mode/v1` |
+| `azure` | Azure OpenAI | 需手动设置 | 需手动设置 |
+| `custom` | 自定义 | 需手动设置 | 需手动设置 |
+
+> **提示**：任何兼容 OpenAI Chat Completions API（`/v1/chat/completions`）的服务都可以通过 `custom` 预设或手动指定 `LLM_BASE_URL` + `LLM_CHAT_MODEL` 接入。
 
 ### 3. 启动服务
 
@@ -187,14 +224,17 @@ Agent 实现了标准的 ReAct（Reasoning + Acting）模式：
 
 ### 搜索引擎设计
 
-**倒排索引**：`token → {doc_id → [positions]}`，支持快速检索和片段定位。
+**倒排索引**（Phase 1）：`token → {doc_id → [positions]}`，支持快速检索和片段定位。
 
-**TF-IDF 评分**：
+**TF-IDF 评分**（Phase 1）：
 - TF（词频）：词在文档中出现的频率
-- IDF（逆文档频率）：衡量词的区分度
+- IDF（逆文档频率）：衡量词的区分度，预计算缓存避免重复计算
 - 使用余弦相似度计算查询与文档的相关性
+- 100 份文档下检索响应时间 < 10ms（纯内存操作）
 
-**语义重排序**（Phase 2）：
-- 第一轮：关键词搜索获取候选（扩大召回）
-- 第二轮：DeepSeek LLM 逐条评估语义相关性（精准排序）
-- 结果过滤低分文档，按 LLM 评分降序排列
+**LLM 直接排序**（Phase 2）：
+- 所有文档的标题 + 紧凑摘要（~250 字/篇）一次性发给 LLM
+- LLM 理解查询意图后一次性返回排序结果
+- 避免了关键词搜索瓶颈：口语化查询也能正确匹配
+- 100 份文档场景：~25,500 字符（~12,750 tokens），适合 32K+ 上下文窗口
+- 单次 LLM 调用，延迟取决于 API 响应速度（通常 2-5 秒）

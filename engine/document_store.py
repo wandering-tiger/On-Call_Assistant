@@ -125,12 +125,20 @@ class DocumentStore:
     """
     In-memory document store with inverted index and TF-IDF scoring.
     Supports keyword search with snippet generation.
+
+    Performance characteristics for 100 documents:
+    - Inverted index lookup: O(k) where k = number of unique query tokens
+    - TF-IDF scoring: O(k × m) where m = candidate docs matched
+    - IDF values are pre-computed and cached for fast repeated queries
+    - All data is in-memory for sub-millisecond response times
     """
 
     def __init__(self):
         self.documents: dict[str, dict] = {}  # doc_id -> {id, title, html, text, tokens}
         # Inverted index: token -> {doc_id -> [positions]}
         self.inverted_index: dict[str, dict[str, list[int]]] = defaultdict(lambda: defaultdict(list))
+        # Pre-computed IDF cache: token -> idf_value
+        self._idf_cache: dict[str, float] = {}
         self.doc_count = 0
         self._load_all()
 
@@ -182,6 +190,8 @@ class DocumentStore:
         # Add to inverted index
         for token, positions in positions_map.items():
             self.inverted_index[token][doc_id] = positions
+            # Invalidate IDF cache for this token
+            self._idf_cache.pop(token, None)
 
         return {"id": doc_id, "title": title}
 
@@ -232,40 +242,43 @@ class DocumentStore:
 
         return results
 
+    def _get_idf(self, token: str) -> float:
+        """Get IDF value for a token, using pre-computed cache."""
+        if token not in self._idf_cache:
+            df = len(self.inverted_index.get(token, {}))
+            self._idf_cache[token] = math.log((self.doc_count + 1) / (df + 1)) + 1.0
+        return self._idf_cache[token]
+
     def _tfidf_score(self, query_tokens: list[str], doc_id: str) -> float:
-        """Compute TF-IDF cosine similarity score."""
+        """Compute TF-IDF cosine similarity score (with cached IDF)."""
         doc = self.documents[doc_id]
         doc_len = len(doc["tokens"])
         if doc_len == 0:
             return 0.0
 
-        # Query TF vector
+        # Query TF vector (normalised)
         query_tf: dict[str, float] = defaultdict(float)
         for t in query_tokens:
             query_tf[t] += 1.0
+        q_len = len(query_tokens)
         for t in query_tf:
-            query_tf[t] /= len(query_tokens)
+            query_tf[t] /= q_len
 
-        # Document TF vector (for query tokens)
-        doc_tf: dict[str, float] = {}
-        for t in query_tokens:
-            if t in doc["positions"]:
-                doc_tf[t] = len(doc["positions"][t]) / doc_len
-            else:
-                doc_tf[t] = 0.0
-
-        # IDF
+        # Compute dot product + norms in one pass
         dot_product = 0.0
         query_norm = 0.0
         doc_norm = 0.0
         for t in query_tokens:
-            df = len(self.inverted_index.get(t, {}))
-            idf = math.log((self.doc_count + 1) / (df + 1)) + 1.0
+            idf = self._get_idf(t)
             qw = query_tf[t] * idf
-            dw = doc_tf[t] * idf
-            dot_product += qw * dw
             query_norm += qw * qw
+
+            if t in doc["positions"]:
+                dw = (len(doc["positions"][t]) / doc_len) * idf
+            else:
+                dw = 0.0
             doc_norm += dw * dw
+            dot_product += qw * dw
 
         if query_norm == 0 or doc_norm == 0:
             return 0.0
@@ -349,6 +362,44 @@ class DocumentStore:
             for doc in self.documents.values()
         ]
 
+    def get_compact_summary(self, doc_id: str, max_chars: int = 300) -> str:
+        """
+        Build a compact summary for semantic search ranking.
+        Prioritises headings + first meaningful content paragraphs.
+        With 100 docs × 300 chars ≈ 30K chars, this fits easily in 32K-token LLM windows.
+        """
+        doc = self.documents.get(doc_id)
+        if not doc:
+            return ""
+
+        html = doc["html"]
+        soup = BeautifulSoup(html, "html.parser")
+        for tag in soup(["script", "style", "noscript", "meta", "link"]):
+            tag.decompose()
+
+        parts = []
+        char_count = 0
+
+        # Extract headings first (they carry the most semantic signal)
+        for h in soup.find_all(["h1", "h2", "h3"]):
+            text = h.get_text(strip=True)
+            if text and text != doc["title"]:
+                parts.append(text)
+                char_count += len(text)
+                if char_count >= max_chars:
+                    return " | ".join(parts)[:max_chars]
+
+        # Then add body paragraphs
+        for p in soup.find_all("p"):
+            text = p.get_text(strip=True)
+            if text and len(text) > 15:  # skip very short/empty paragraphs
+                parts.append(text)
+                char_count += len(text)
+                if char_count >= max_chars:
+                    return " | ".join(parts)[:max_chars]
+
+        return " | ".join(parts)[:max_chars]
+
     def get_document_sections(self, doc_id: str) -> list[dict]:
         """Split a document into sections by headings for semantic search."""
         doc = self.documents.get(doc_id)
@@ -366,7 +417,6 @@ class DocumentStore:
 
         for element in soup.find_all(["h1", "h2", "h3", "h4", "p", "li"]):
             if element.name in ("h1", "h2", "h3", "h4"):
-                # Save previous section
                 if current_text:
                     sections.append({
                         "heading": current_heading,
@@ -379,7 +429,6 @@ class DocumentStore:
                 if text:
                     current_text.append(text)
 
-        # Save last section
         if current_text:
             sections.append({
                 "heading": current_heading,

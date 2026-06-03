@@ -13,9 +13,9 @@ from typing import AsyncGenerator, Optional
 import httpx
 
 from config import (
-    DEEPSEEK_API_KEY,
-    DEEPSEEK_BASE_URL,
-    DEEPSEEK_CHAT_MODEL,
+    LLM_API_KEY,
+    LLM_BASE_URL,
+    LLM_CHAT_MODEL,
     DATA_DIR,
 )
 from engine.document_store import store
@@ -329,12 +329,12 @@ class ReActAgent:
     ) -> Optional[str]:
         """Call DeepSeek chat API."""
         headers = {
-            "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+            "Authorization": f"Bearer {LLM_API_KEY}",
             "Content-Type": "application/json",
         }
 
         request = {
-            "model": DEEPSEEK_CHAT_MODEL,
+            "model": LLM_CHAT_MODEL,
             "messages": messages,
             "temperature": 0.3,
             "max_tokens": 4096,
@@ -343,7 +343,7 @@ class ReActAgent:
 
         try:
             response = await client.post(
-                f"{DEEPSEEK_BASE_URL}/v1/chat/completions",
+                f"{LLM_BASE_URL}/v1/chat/completions",
                 headers=headers,
                 json=request,
                 timeout=120.0,
